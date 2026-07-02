@@ -6433,7 +6433,7 @@ mod tests {
                 plugin_id: None,
             }]));
             composer.set_text_content("$simplify-code".to_string(), Vec::new(), Vec::new());
-            composer.draft.textarea.set_cursor(0);
+            composer.draft.textarea.set_cursor(/*pos*/ 0);
 
             composer.insert_str(inserted);
 
