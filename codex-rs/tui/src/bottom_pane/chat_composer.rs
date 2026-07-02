@@ -225,6 +225,7 @@ use self::draft_state::DraftState;
 use self::footer_state::FooterState;
 use self::history_search::HistorySearchSession;
 use self::popup_state::ActivePopup;
+use self::popup_state::DismissedToken;
 use self::popup_state::PopupState;
 use self::slash_input::SlashInput;
 use self::slash_input::SlashValidation;
@@ -1802,8 +1803,12 @@ impl ChatComposer {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                if let Some(tok) = Self::current_at_token(&self.draft.textarea) {
-                    self.popups.dismissed_file_token = Some(tok);
+                if let Some((range, query)) = Self::current_prefixed_token_range(
+                    &self.draft.textarea,
+                    '@',
+                    /*allow_empty*/ false,
+                ) {
+                    self.popups.dismissed_file_token = Some(DismissedToken::new(range, query));
                 }
                 self.popups.active = ActivePopup::None;
                 (InputResult::None, true)
@@ -1879,8 +1884,8 @@ impl ChatComposer {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                if let Some(tok) = self.current_mention_token() {
-                    self.popups.dismissed_mention_token = Some(tok);
+                if let Some((range, query)) = self.current_mention_token_range() {
+                    self.popups.dismissed_mention_token = Some(DismissedToken::new(range, query));
                 }
                 self.popups.active = ActivePopup::None;
                 (InputResult::None, true)
@@ -1983,8 +1988,8 @@ impl ChatComposer {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                if let Some(tok) = self.current_mentions_v2_token() {
-                    self.popups.dismissed_mention_token = Some(tok);
+                if let Some((range, query)) = self.current_mentions_v2_token_range() {
+                    self.popups.dismissed_mention_token = Some(DismissedToken::new(range, query));
                 }
                 self.popups.active = ActivePopup::None;
                 (InputResult::None, true)
@@ -2067,22 +2072,34 @@ impl ChatComposer {
         }
     }
 
-    fn dismiss_completed_prefixed_token(&mut self, prefix: char, inserted_text: &str) {
+    fn dismiss_completed_prefixed_token(
+        &mut self,
+        prefix: char,
+        inserted_range: Range<usize>,
+        inserted_text: &str,
+    ) {
         let Some(completed_token) = inserted_text.strip_prefix(prefix) else {
             return;
         };
         // Completion leaves the cursor on separator whitespace, where normal token affinity would
         // otherwise immediately reopen the popup for sigil-prefixed inserted text.
-        let current_token =
-            Self::current_prefixed_token(&self.draft.textarea, prefix, /*allow_empty*/ true);
-        if current_token.as_deref() != Some(completed_token) {
+        let Some((current_range, current_token)) = Self::current_prefixed_token_range(
+            &self.draft.textarea,
+            prefix,
+            /*allow_empty*/ true,
+        ) else {
+            return;
+        };
+        if current_range != inserted_range || current_token != completed_token {
             return;
         }
 
         if prefix == '@' && !self.mentions_v2_enabled {
-            self.popups.dismissed_file_token = current_token;
+            self.popups.dismissed_file_token =
+                Some(DismissedToken::new(current_range, current_token));
         } else {
-            self.popups.dismissed_mention_token = current_token;
+            self.popups.dismissed_mention_token =
+                Some(DismissedToken::new(current_range, current_token));
         }
     }
 
@@ -2430,15 +2447,16 @@ impl ChatComposer {
         self.current_editable_at_token_with_options(/*allow_empty*/ false)
     }
 
-    fn current_mentions_v2_token(&self) -> Option<String> {
+    fn current_mentions_v2_token_range(&self) -> Option<(Range<usize>, String)> {
         if !self.mentions_v2_enabled {
             return None;
         }
-        self.current_editable_at_token_with_options(/*allow_empty*/ true)
+        self.current_editable_at_token_range_with_options(/*allow_empty*/ true)
     }
 
-    fn current_mention_token(&self) -> Option<String> {
-        self.current_mention_token_range().map(|(_, token)| token)
+    fn current_mentions_v2_token(&self) -> Option<String> {
+        self.current_mentions_v2_token_range()
+            .map(|(_, token)| token)
     }
 
     fn current_mention_token_range(&self) -> Option<(Range<usize>, String)> {
@@ -2464,11 +2482,10 @@ impl ChatComposer {
         // large-paste placeholders, remain atomic and can still expand on submit.
         let start_idx = token_range.start;
         self.draft.textarea.replace_range(token_range, &inserted);
-        self.draft
-            .textarea
-            .set_cursor(start_idx.saturating_add(inserted.len()));
+        let inserted_range = start_idx..start_idx.saturating_add(inserted.len());
+        self.draft.textarea.set_cursor(inserted_range.end);
         self.advance_past_completion_separator();
-        self.dismiss_completed_prefixed_token('@', &inserted);
+        self.dismiss_completed_prefixed_token('@', inserted_range, &inserted);
     }
 
     fn insert_selected_mention(
@@ -2482,6 +2499,7 @@ impl ChatComposer {
         self.draft.textarea.replace_range(token_range, "");
         self.draft.textarea.set_cursor(start_idx);
         let id = self.draft.textarea.insert_element(insert_text);
+        let inserted_range = start_idx..start_idx.saturating_add(insert_text.len());
 
         if let (Some(path), Some((sigil, mention))) =
             (path, Self::mention_token_from_insert_text(insert_text))
@@ -2500,7 +2518,7 @@ impl ChatComposer {
         if let Some(sigil) = insert_text.chars().next()
             && matches!(sigil, '$' | '@')
         {
-            self.dismiss_completed_prefixed_token(sigil, insert_text);
+            self.dismiss_completed_prefixed_token(sigil, inserted_range, insert_text);
         }
     }
 
@@ -3501,11 +3519,11 @@ impl ChatComposer {
             self.popups.active = ActivePopup::None;
             return;
         }
-        let mentions_v2_token = self.current_mentions_v2_token();
+        let mentions_v2_token = self.current_mentions_v2_token_range();
         let file_token = if self.mentions_v2_enabled {
             None
         } else {
-            self.current_editable_at_token()
+            self.current_editable_at_token_range_with_options(/*allow_empty*/ false)
         };
         let browsing_history = self
             .history
@@ -3521,7 +3539,7 @@ impl ChatComposer {
             self.popups.active = ActivePopup::None;
             return;
         }
-        let mention_token = self.current_mention_token();
+        let mention_token = self.current_mention_token_range();
 
         let allow_command_popup = self.slash_commands_enabled()
             && !self.draft.is_bash_mode
@@ -3541,24 +3559,24 @@ impl ChatComposer {
             return;
         }
 
-        if let Some(token) = mentions_v2_token {
-            self.sync_mentions_v2_popup(token);
+        if let Some((range, token)) = mentions_v2_token {
+            self.sync_mentions_v2_popup(range, token);
             return;
         }
 
-        if let Some(token) = mention_token {
+        if let Some((range, token)) = mention_token {
             if self.popups.current_file_query.is_some() {
                 self.app_event_tx
                     .send(AppEvent::StartFileSearch(String::new()));
                 self.popups.current_file_query = None;
             }
-            self.sync_mention_popup(token);
+            self.sync_mention_popup(range, token);
             return;
         }
         self.popups.dismissed_mention_token = None;
 
-        if let Some(token) = file_token {
-            self.sync_file_search_popup(token);
+        if let Some((range, token)) = file_token {
+            self.sync_file_search_popup(range, token);
             return;
         }
 
@@ -3632,8 +3650,13 @@ impl ChatComposer {
     }
 
     /// Synchronize the legacy file-search popup with the current `@` token.
-    fn sync_file_search_popup(&mut self, query: String) {
-        if self.popups.dismissed_file_token.as_ref() == Some(&query) {
+    fn sync_file_search_popup(&mut self, range: Range<usize>, query: String) {
+        if self
+            .popups
+            .dismissed_file_token
+            .as_ref()
+            .is_some_and(|dismissed| dismissed.matches(&range, &query))
+        {
             return;
         }
 
@@ -3672,8 +3695,13 @@ impl ChatComposer {
         self.popups.dismissed_file_token = None;
     }
 
-    fn sync_mention_popup(&mut self, query: String) {
-        if self.popups.dismissed_mention_token.as_ref() == Some(&query) {
+    fn sync_mention_popup(&mut self, range: Range<usize>, query: String) {
+        if self
+            .popups
+            .dismissed_mention_token
+            .as_ref()
+            .is_some_and(|dismissed| dismissed.matches(&range, &query))
+        {
             return;
         }
 
@@ -3696,8 +3724,13 @@ impl ChatComposer {
         }
     }
 
-    fn sync_mentions_v2_popup(&mut self, query: String) {
-        if self.popups.dismissed_mention_token.as_ref() == Some(&query) {
+    fn sync_mentions_v2_popup(&mut self, range: Range<usize>, query: String) {
+        if self
+            .popups
+            .dismissed_mention_token
+            .as_ref()
+            .is_some_and(|dismissed| dismissed.matches(&range, &query))
+        {
             return;
         }
 
@@ -6308,6 +6341,38 @@ mod tests {
             composer.current_text(),
             "$unbound-skill foo $bound-skill continue"
         );
+    }
+
+    #[test]
+    fn skill_completion_does_not_dismiss_identical_next_mention() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer.set_skill_mentions(Some(vec![SkillMetadata {
+            name: "skill".to_string(),
+            description: "Example skill used in tests.".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: test_path_buf("/tmp/skill/SKILL.md").abs(),
+            scope: crate::test_support::skill_scope_user(),
+            plugin_id: None,
+        }]));
+        composer.set_text_content("$skill $skill".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$skill".len());
+        composer.sync_popups();
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(composer.draft.textarea.cursor(), "$skill ".len());
+        assert!(matches!(composer.popups.active, ActivePopup::Skill(_)));
     }
 
     #[test]
@@ -9241,6 +9306,38 @@ mod tests {
             InputResult::Submitted { text, .. } => assert_eq!(text, "@scope/main.rs \nnext"),
             _ => panic!("expected completed path to submit"),
         }
+    }
+
+    #[test]
+    fn file_completion_does_not_dismiss_identical_next_token() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer.set_text_content("@ma  @scope/main.rs".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("@ma".len());
+        composer.sync_popups();
+        composer.on_file_search_result(
+            "ma".to_string(),
+            vec![FileMatch {
+                score: 1,
+                path: PathBuf::from("@scope/main.rs"),
+                match_type: codex_file_search::MatchType::File,
+                root: PathBuf::from("/tmp"),
+                indices: None,
+            }],
+        );
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        composer.draft.textarea.set_cursor("@scope/main.rs  ".len());
+        composer.sync_popups();
+
+        assert!(matches!(composer.popups.active, ActivePopup::File(_)));
     }
 
     #[test]
