@@ -604,10 +604,7 @@ pub(crate) async fn record_additional_contexts(
     }
 
     let signature = normalized_contexts.join("\n\n---\n\n");
-    let should_record = {
-        let mut state = sess.state.lock().await;
-        state.should_record_hook_additional_contexts(&signature)
-    };
+    let should_record = sess.should_record_hook_additional_contexts(&signature).await;
     if !should_record {
         return;
     }

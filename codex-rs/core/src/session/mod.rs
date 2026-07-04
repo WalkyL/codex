@@ -3958,6 +3958,14 @@ impl Session {
         state.take_pending_session_start_source()
     }
 
+    pub(crate) async fn should_record_hook_additional_contexts(
+        &self,
+        signature: &str,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        state.should_record_hook_additional_contexts(signature)
+    }
+
     fn show_raw_agent_reasoning(&self) -> bool {
         self.services.show_raw_agent_reasoning
     }
