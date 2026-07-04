@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -597,7 +598,21 @@ pub(crate) async fn record_additional_contexts(
     turn_context: &Arc<TurnContext>,
     additional_contexts: Vec<String>,
 ) {
-    let developer_messages = additional_context_messages(additional_contexts);
+    let normalized_contexts = normalize_additional_contexts(additional_contexts);
+    if normalized_contexts.is_empty() {
+        return;
+    }
+
+    let signature = normalized_contexts.join("\n\n---\n\n");
+    let should_record = {
+        let mut state = sess.state.lock().await;
+        state.should_record_hook_additional_contexts(&signature)
+    };
+    if !should_record {
+        return;
+    }
+
+    let developer_messages = additional_context_messages(normalized_contexts);
     if developer_messages.is_empty() {
         return;
     }
@@ -612,6 +627,22 @@ fn additional_context_messages(additional_contexts: Vec<String>) -> Vec<Response
         .map(HookAdditionalContext::new)
         .map(ContextualUserFragment::into)
         .collect()
+}
+
+fn normalize_additional_contexts(additional_contexts: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for context in additional_contexts {
+        let trimmed = context.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized_text = trimmed.to_string();
+        if seen.insert(normalized_text.clone()) {
+            normalized.push(normalized_text);
+        }
+    }
+    normalized
 }
 
 async fn emit_hook_started_events(
@@ -786,6 +817,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::additional_context_messages;
+    use super::normalize_additional_contexts;
     use super::hook_run_analytics_payload;
     use super::hook_run_metric_tags;
     use crate::session::tests::make_session_and_context;
@@ -825,6 +857,26 @@ mod tests {
                 ("developer", "first tide note".to_string()),
                 ("developer", "second tide note".to_string()),
             ],
+        );
+    }
+
+    #[test]
+    fn normalize_additional_contexts_dedupes_and_drops_blank_entries() {
+        let normalized = normalize_additional_contexts(vec![
+            " first tide note ".to_string(),
+            "".to_string(),
+            "second tide note".to_string(),
+            "first tide note".to_string(),
+            "   ".to_string(),
+            "second tide note   ".to_string(),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                "first tide note".to_string(),
+                "second tide note".to_string(),
+            ]
         );
     }
 

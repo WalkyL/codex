@@ -8,6 +8,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
+use serde::Serialize;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +21,22 @@ use crate::state_db_bridge::StateDbHandle;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 use codex_extension_api::empty_extension_registry;
+
+#[derive(Debug, Serialize)]
+pub struct DebugRuntimeSnapshot {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub cwd: String,
+    pub model: String,
+    pub model_provider: String,
+    pub model_context_window: Option<i64>,
+    pub auto_compact_token_limit: Option<i64>,
+    pub auto_compact_token_limit_scope: String,
+    pub prompt_input_count: usize,
+    pub input_modalities: Vec<String>,
+    pub tools_visible_count: usize,
+    pub prompt_preview_text_items: usize,
+}
 
 /// Build the model-visible `input` list for a single debug turn.
 #[doc(hidden)]
@@ -102,4 +119,94 @@ pub(crate) async fn build_prompt_input_from_session(
     );
 
     Ok(prompt.input)
+}
+
+pub async fn build_runtime_snapshot(
+    mut config: Config,
+    input: Vec<UserInput>,
+    state_db: Option<StateDbHandle>,
+    user_instructions_provider: Arc<dyn UserInstructionsProvider>,
+) -> CodexResult<DebugRuntimeSnapshot> {
+    config.ephemeral = true;
+
+    let auth_manager =
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+
+    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+        config.codex_self_exe.clone(),
+        config.codex_linux_sandbox_exe.clone(),
+    )?;
+
+    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let installation_id = resolve_installation_id(&config.codex_home).await?;
+    let thread_manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        SessionSource::Exec,
+        Arc::new(
+            EnvironmentManager::from_codex_home(
+                config.codex_home.clone(),
+                Some(local_runtime_paths),
+            )
+            .await
+            .map_err(|err| CodexErr::Fatal(err.to_string()))?,
+        ),
+        empty_extension_registry(),
+        user_instructions_provider,
+        /*analytics_events_client*/ None,
+        thread_store,
+        crate::local_agent_graph_store_from_state_db(state_db.as_ref()),
+        installation_id,
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let thread = thread_manager.start_thread(config).await?;
+    let sess = &thread.thread.codex.session;
+    let turn_context = sess.new_default_turn().await;
+    let step_context = sess.capture_step_context(Arc::clone(&turn_context)).await;
+    sess.record_context_updates_and_set_reference_context_item(step_context.as_ref())
+        .await;
+
+    if !input.is_empty() {
+        let response_item = sess.response_item_from_user_input(input);
+        sess.record_conversation_items(turn_context.as_ref(), std::slice::from_ref(&response_item))
+            .await;
+    }
+
+    let prompt_input = sess
+        .clone_history()
+        .await
+        .for_prompt(&turn_context.model_info.input_modalities);
+    let router = built_tools(sess, step_context.as_ref(), &CancellationToken::new()).await?;
+
+    let snapshot = DebugRuntimeSnapshot {
+        thread_id: sess.thread_id.to_string(),
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.display().to_string(),
+        model: turn_context.model_info.slug.clone(),
+        model_provider: turn_context.config.model_provider_id.clone(),
+        model_context_window: turn_context.model_context_window(),
+        auto_compact_token_limit: turn_context.config.model_auto_compact_token_limit,
+        auto_compact_token_limit_scope: turn_context
+            .config
+            .model_auto_compact_token_limit_scope
+            .to_string(),
+        prompt_input_count: prompt_input.len(),
+        input_modalities: turn_context
+            .model_info
+            .input_modalities
+            .iter()
+            .map(|modality| format!("{modality:?}"))
+            .collect(),
+        tools_visible_count: router.model_visible_specs().len(),
+        prompt_preview_text_items: prompt_input
+            .iter()
+            .filter(|item| matches!(item, ResponseItem::Message { .. }))
+            .count(),
+    };
+
+    let shutdown = thread.thread.shutdown_and_wait().await;
+    let _removed = thread_manager.remove_thread(&thread.thread_id).await;
+    shutdown?;
+    Ok(snapshot)
 }

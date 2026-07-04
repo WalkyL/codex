@@ -42,6 +42,7 @@ pub(crate) struct SessionState {
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_sources: VecDeque<codex_hooks::SessionStartSource>,
     granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
+    last_hook_additional_context_signature: Option<String>,
     next_turn_is_first: bool,
 }
 
@@ -74,6 +75,7 @@ impl SessionState {
             active_connector_selection: HashSet::new(),
             pending_session_start_sources: VecDeque::new(),
             granted_permissions_by_environment_id: HashMap::new(),
+            last_hook_additional_context_signature: None,
             next_turn_is_first: true,
         }
     }
@@ -120,6 +122,22 @@ impl SessionState {
         self.history
             .set_reference_context_item(reference_context_item);
         self.auto_compact_window.clear_prefill();
+        self.last_hook_additional_context_signature = None;
+    }
+
+    pub(crate) fn should_record_hook_additional_contexts(
+        &mut self,
+        signature: &str,
+    ) -> bool {
+        if self
+            .last_hook_additional_context_signature
+            .as_deref()
+            .is_some_and(|last| last == signature)
+        {
+            return false;
+        }
+        self.last_hook_additional_context_signature = Some(signature.to_string());
+        true
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
