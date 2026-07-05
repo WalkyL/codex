@@ -3479,6 +3479,11 @@ impl Session {
         format!("{thread_id}:{window_number}")
     }
 
+    pub(crate) async fn auto_compact_window_number(&self) -> u64 {
+        let state = self.state.lock().await;
+        state.auto_compact_window_number()
+    }
+
     pub(crate) async fn advance_auto_compact_window(&self) -> (u64, AutoCompactWindowIds) {
         let mut state = self.state.lock().await;
         state.advance_auto_compact_window()

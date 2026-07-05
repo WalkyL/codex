@@ -45,6 +45,18 @@ pub struct DebugRuntimeSnapshot {
     pub prompt_preview_text_items: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DebugLiveContinuationSnapshot {
+    pub thread_id: String,
+    pub active_turn_present: bool,
+    pub pending_input_present: bool,
+    pub trigger_turn_mailbox_present: bool,
+    pub auto_compact_window_number: u64,
+    pub total_input_tokens: Option<i64>,
+    pub total_cached_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+}
+
 /// Build the model-visible `input` list for a single debug turn.
 #[doc(hidden)]
 pub async fn build_prompt_input(
@@ -224,4 +236,27 @@ pub async fn build_runtime_snapshot(
     let _removed = thread_manager.remove_thread(&thread.thread_id).await;
     shutdown?;
     Ok(snapshot)
+}
+
+pub async fn build_live_continuation_snapshot(
+    sess: &Arc<Session>,
+) -> CodexResult<DebugLiveContinuationSnapshot> {
+    let active_turn_present = sess.active_turn.lock().await.is_some();
+    let pending_input_present = sess.input_queue.has_pending_input(&sess.active_turn).await;
+    let trigger_turn_mailbox_present = sess.input_queue.has_trigger_turn_mailbox_items().await;
+    let window_number = sess.auto_compact_window_number().await;
+    let token_info = sess.token_usage_info().await;
+
+    Ok(DebugLiveContinuationSnapshot {
+        thread_id: sess.thread_id.to_string(),
+        active_turn_present,
+        pending_input_present,
+        trigger_turn_mailbox_present,
+        auto_compact_window_number: window_number,
+        total_input_tokens: token_info.as_ref().map(|info| info.total_token_usage.input_tokens),
+        total_cached_input_tokens: token_info
+            .as_ref()
+            .map(|info| info.total_token_usage.cached_input_tokens),
+        total_output_tokens: token_info.as_ref().map(|info| info.total_token_usage.output_tokens),
+    })
 }

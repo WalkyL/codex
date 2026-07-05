@@ -79,6 +79,8 @@ pub(crate) mod prompt_debug;
 pub use prompt_debug::build_prompt_input;
 #[doc(hidden)]
 pub use prompt_debug::build_runtime_snapshot;
+#[doc(hidden)]
+pub use prompt_debug::build_live_continuation_snapshot;
 pub(crate) mod mentions {
     pub(crate) use crate::plugins::build_connector_slug_counts;
     pub(crate) use crate::plugins::build_skill_name_counts;
