@@ -3966,6 +3966,10 @@ impl Session {
         state.should_record_hook_additional_contexts(signature)
     }
 
+    pub(crate) fn public_show_raw_agent_reasoning(&self) -> bool {
+        self.services.show_raw_agent_reasoning
+    }
+
     fn show_raw_agent_reasoning(&self) -> bool {
         self.services.show_raw_agent_reasoning
     }

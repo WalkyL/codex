@@ -29,9 +29,16 @@ pub struct DebugRuntimeSnapshot {
     pub cwd: String,
     pub model: String,
     pub model_provider: String,
+    pub collaboration_mode: String,
+    pub personality: Option<String>,
+    pub approval_policy: String,
+    pub permission_profile: String,
+    pub service_tier: Option<String>,
+    pub show_raw_agent_reasoning: bool,
     pub model_context_window: Option<i64>,
     pub auto_compact_token_limit: Option<i64>,
     pub auto_compact_token_limit_scope: String,
+    pub reference_context_present: bool,
     pub prompt_input_count: usize,
     pub input_modalities: Vec<String>,
     pub tools_visible_count: usize,
@@ -178,6 +185,7 @@ pub async fn build_runtime_snapshot(
         .await
         .for_prompt(&turn_context.model_info.input_modalities);
     let router = built_tools(sess, step_context.as_ref(), &CancellationToken::new()).await?;
+    let reference_context_present = sess.reference_context_item().await.is_some();
 
     let snapshot = DebugRuntimeSnapshot {
         thread_id: sess.thread_id.to_string(),
@@ -185,12 +193,19 @@ pub async fn build_runtime_snapshot(
         cwd: turn_context.cwd.display().to_string(),
         model: turn_context.model_info.slug.clone(),
         model_provider: turn_context.config.model_provider_id.clone(),
+        collaboration_mode: format!("{:?}", turn_context.collaboration_mode.mode),
+        personality: turn_context.personality.map(|personality| format!("{personality:?}")),
+        approval_policy: format!("{:?}", turn_context.approval_policy.value()),
+        permission_profile: format!("{:?}", turn_context.permission_profile()),
+        service_tier: turn_context.config.service_tier.clone(),
+        show_raw_agent_reasoning: sess.public_show_raw_agent_reasoning(),
         model_context_window: turn_context.model_context_window(),
         auto_compact_token_limit: turn_context.config.model_auto_compact_token_limit,
         auto_compact_token_limit_scope: turn_context
             .config
             .model_auto_compact_token_limit_scope
             .to_string(),
+        reference_context_present,
         prompt_input_count: prompt_input.len(),
         input_modalities: turn_context
             .model_info
