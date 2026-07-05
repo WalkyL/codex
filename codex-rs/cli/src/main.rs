@@ -238,6 +238,9 @@ enum DebugSubcommand {
     /// Render a lightweight runtime snapshot as JSON.
     Snapshot(DebugPromptInputCommand),
 
+    /// Render a lightweight live continuation snapshot as JSON.
+    LiveSnapshot,
+
     /// Replay a rollout trace bundle and write reduced state JSON.
     #[clap(hide = true)]
     TraceReduce(DebugTraceReduceCommand),
@@ -1535,6 +1538,19 @@ async fn cli_main(
                 )
                 .await?;
             }
+            DebugSubcommand::LiveSnapshot => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug live-snapshot",
+                )?;
+                run_debug_live_snapshot_command(
+                    root_config_overrides,
+                    interactive,
+                    arg0_paths.clone(),
+                )
+                .await?;
+            }
             DebugSubcommand::TraceReduce(cmd) => {
                 reject_remote_mode_for_subcommand(
                     root_remote.as_deref(),
@@ -1683,10 +1699,12 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Mcp(_)
         | Subcommand::Sandbox(_)
         | Subcommand::Debug(DebugCommand {
-            subcommand: DebugSubcommand::PromptInput(_) | DebugSubcommand::Snapshot(_),
+            subcommand: DebugSubcommand::PromptInput(_)
+                | DebugSubcommand::Snapshot(_)
+                | DebugSubcommand::LiveSnapshot,
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, `codex debug prompt-input`, and `codex debug snapshot`."
+            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, `codex debug prompt-input`, `codex debug snapshot`, and `codex debug live-snapshot`."
         ),
     }
 }
@@ -2070,6 +2088,67 @@ async fn run_debug_snapshot_command(
     let snapshot = codex_core::build_runtime_snapshot(
         config,
         input,
+        /*state_db*/ None,
+        user_instructions_provider,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
+}
+
+async fn run_debug_live_snapshot_command(
+    root_config_overrides: CliConfigOverrides,
+    interactive: TuiCli,
+    arg0_paths: Arg0DispatchPaths,
+) -> anyhow::Result<()> {
+    let loader_overrides = loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
+    let shared = interactive.shared.into_inner();
+    let mut cli_kv_overrides = root_config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    if interactive.web_search {
+        cli_kv_overrides.push((
+            "web_search".to_string(),
+            toml::Value::String("live".to_string()),
+        ));
+    }
+
+    let approval_policy = if shared.dangerously_bypass_approvals_and_sandbox {
+        Some(AskForApproval::Never)
+    } else {
+        interactive.approval_policy.map(Into::into)
+    };
+    let sandbox_mode = if shared.dangerously_bypass_approvals_and_sandbox {
+        Some(codex_protocol::config_types::SandboxMode::DangerFullAccess)
+    } else {
+        shared.sandbox_mode.map(Into::into)
+    };
+    let overrides = ConfigOverrides {
+        model: shared.model,
+        approval_policy,
+        sandbox_mode,
+        cwd: shared.cwd,
+        codex_self_exe: arg0_paths.codex_self_exe,
+        codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
+        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe,
+        show_raw_agent_reasoning: shared.oss.then_some(true),
+        ephemeral: Some(true),
+        bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
+        additional_writable_roots: shared.add_dir,
+        ..Default::default()
+    };
+    let config = ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .harness_overrides(overrides)
+        .loader_overrides(loader_overrides)
+        .build()
+        .await?;
+
+    let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
+        config.codex_home.clone(),
+    ));
+    let snapshot = codex_core::build_live_continuation_snapshot_for_config(
+        config,
         /*state_db*/ None,
         user_instructions_provider,
     )
@@ -2767,6 +2846,12 @@ mod tests {
         assert_eq!(
             profile_v2_for_args(&["codex", "--profile", "work", "debug", "snapshot"])
                 .expect("debug snapshot supports profile-v2")
+                .as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            profile_v2_for_args(&["codex", "--profile", "work", "debug", "live-snapshot"])
+                .expect("debug live-snapshot supports profile-v2")
                 .as_deref(),
             Some("work")
         );

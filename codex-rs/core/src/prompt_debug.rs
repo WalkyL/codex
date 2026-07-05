@@ -238,6 +238,53 @@ pub async fn build_runtime_snapshot(
     Ok(snapshot)
 }
 
+pub async fn build_live_continuation_snapshot_for_config(
+    mut config: Config,
+    state_db: Option<StateDbHandle>,
+    user_instructions_provider: Arc<dyn UserInstructionsProvider>,
+) -> CodexResult<DebugLiveContinuationSnapshot> {
+    config.ephemeral = true;
+
+    let auth_manager =
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+
+    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+        config.codex_self_exe.clone(),
+        config.codex_linux_sandbox_exe.clone(),
+    )?;
+
+    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let installation_id = resolve_installation_id(&config.codex_home).await?;
+    let thread_manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        SessionSource::Exec,
+        Arc::new(
+            EnvironmentManager::from_codex_home(
+                config.codex_home.clone(),
+                Some(local_runtime_paths),
+            )
+            .await
+            .map_err(|err| CodexErr::Fatal(err.to_string()))?,
+        ),
+        empty_extension_registry(),
+        user_instructions_provider,
+        /*analytics_events_client*/ None,
+        thread_store,
+        crate::local_agent_graph_store_from_state_db(state_db.as_ref()),
+        installation_id,
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let thread = thread_manager.start_thread(config).await?;
+    let sess = &thread.thread.codex.session;
+    let snapshot = build_live_continuation_snapshot(sess).await?;
+    let shutdown = thread.thread.shutdown_and_wait().await;
+    let _removed = thread_manager.remove_thread(&thread.thread_id).await;
+    shutdown?;
+    Ok(snapshot)
+}
+
 pub async fn build_live_continuation_snapshot(
     sess: &Arc<Session>,
 ) -> CodexResult<DebugLiveContinuationSnapshot> {
